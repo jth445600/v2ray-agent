@@ -190,6 +190,18 @@ initVar() {
 
 	# nginx配置文件路径
 	nginxConfigPath=/etc/nginx/conf.d/
+
+	# 是否为预览版
+	prereleaseStatus=false
+
+	# ssl类型
+	sslType=
+
+	# ssl邮箱
+	sslEmail=
+
+	# 检查天数
+	sslRenewalDays=90
 }
 
 # 检测安装方式
@@ -385,7 +397,6 @@ readConfigHostPathUUID() {
 			fi
 		fi
 
-
 		local defaultPortFile=
 		defaultPortFile=$(find ${configPath}* | grep "default")
 
@@ -521,7 +532,7 @@ mkdirTools() {
 	mkdir -p /etc/v2ray-agent/xray/conf
 	mkdir -p /etc/v2ray-agent/xray/tmp
 	mkdir -p /etc/v2ray-agent/trojan
-	mkdir -p /etc/v2ray-agent/hysteria/conf
+	#	mkdir -p /etc/v2ray-agent/hysteria/conf
 	mkdir -p /etc/systemd/system/
 	mkdir -p /tmp/v2ray-agent-tls/
 }
@@ -661,7 +672,8 @@ installTools() {
 
 	if [[ ! -d "$HOME/.acme.sh" ]] || [[ -d "$HOME/.acme.sh" && -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
 		echoContent green " ---> 安装acme.sh"
-		curl -s https://get.acme.sh | sh -s >/etc/v2ray-agent/tls/acme.log 2>&1
+		curl -s https://get.acme.sh | sh >/etc/v2ray-agent/tls/acme.log 2>&1
+
 		if [[ ! -d "$HOME/.acme.sh" ]] || [[ -z $(find "$HOME/.acme.sh/acme.sh") ]]; then
 			echoContent red "  acme安装失败--->"
 			tail -n 100 /etc/v2ray-agent/tls/acme.log
@@ -1009,6 +1021,58 @@ checkIP() {
 	fi
 
 }
+# 自定义email
+customSSLEmail() {
+	if echo "$1" | grep -q "validate email"; then
+		read -r -p "是否重新输入邮箱地址[y/n]:" sslEmailStatus
+		if [[ "${sslEmailStatus}" == "y" ]]; then
+			sed '/ACCOUNT_EMAIL/d' /root/.acme.sh/account.conf >/root/.acme.sh/account.conf_tmp && mv /root/.acme.sh/account.conf_tmp /root/.acme.sh/account.conf
+		else
+			exit 0
+		fi
+	fi
+
+	if [[ -d "/root/.acme.sh" && -f "/root/.acme.sh/account.conf" ]]; then
+		if ! grep -q "ACCOUNT_EMAIL" <"/root/.acme.sh/account.conf" && ! echo "${sslType}" | grep -q "letsencrypt"; then
+			read -r -p "请输入邮箱地址:" sslEmail
+			if echo "${sslEmail}" | grep -q "@"; then
+				echo "ACCOUNT_EMAIL='${sslEmail}'" >>/root/.acme.sh/account.conf
+				echoContent green " ---> 添加成功"
+			else
+				echoContent yellow "请重新输入正确的邮箱格式[例: username@example.com]"
+				customSSLEmail
+			fi
+		fi
+	fi
+
+}
+# 选择ssl安装类型
+switchSSLType() {
+	if [[ -z "${sslType}" ]]; then
+		echoContent red "\n=============================================================="
+		echoContent yellow "1.letsencrypt[默认]"
+		echoContent yellow "2.zerossl"
+		echoContent yellow "3.buypass"
+		echoContent red "=============================================================="
+		read -r -p "请选择[回车]使用默认:" selectSSLType
+		case ${selectSSLType} in
+		1)
+			sslType="letsencrypt"
+			;;
+		2)
+			sslType="zerossl"
+			;;
+		3)
+			sslType="buypass"
+			;;
+		*)
+			sslType="letsencrypt"
+			;;
+		esac
+		touch /etc/v2ray-agent/tls
+		echo "${sslType}" >/etc/v2ray-agent/tls/ssl_type
+	fi
+}
 # 安装TLS
 installTLS() {
 	echoContent skyBlue "\n进度  $1/${totalProgress} : 申请TLS证书\n"
@@ -1032,10 +1096,14 @@ installTLS() {
 
 	elif [[ -d "$HOME/.acme.sh" ]] && [[ ! -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.cer" || ! -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.key" ]]; then
 		echoContent green " ---> 安装TLS证书"
+
+		switchSSLType
+		customSSLEmail
+
 		if echo "${localIP}" | grep -q ":"; then
-			sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server letsencrypt --listen-v6 | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
+			sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server "${sslType}" --listen-v6 2>&1 | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
 		else
-			sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server letsencrypt | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
+			sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server "${sslType}" 2>&1 | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
 		fi
 
 		if [[ -d "$HOME/.acme.sh/${tlsDomain}_ecc" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.key" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.cer" ]]; then
@@ -1047,11 +1115,21 @@ installTLS() {
 				echoContent red " ---> TLS安装失败，请检查acme日志"
 				exit 0
 			fi
+
+			installTLSCount=1
+			echo
 			echoContent red " ---> TLS安装失败，正在检查80、443端口是否开放"
 			allowPort 80
 			allowPort 443
 			echoContent yellow " ---> 重新尝试安装TLS证书"
-			installTLSCount=1
+
+			if tail -n 10 /etc/v2ray-agent/tls/acme.log | grep -q "Could not validate email address as valid"; then
+				echoContent red " ---> 邮箱无法通过SSL厂商验证，请重新输入"
+				echo
+				customSSLEmail "validate email"
+				installTLS "$1"
+			fi
+
 			installTLS "$1"
 		fi
 		echoContent green " ---> TLS生成成功"
@@ -1206,6 +1284,12 @@ renewalTLS() {
 		domain=${tlsDomain}
 	fi
 
+	if [[ -f "/etc/v2ray-agent/tls/ssl_type" ]]; then
+		if grep -q "buypass" <"/etc/v2ray-agent/tls/ssl_type"; then
+			sslRenewalDays=180
+		fi
+	fi
+
 	if [[ -d "$HOME/.acme.sh/${domain}_ecc" ]] && [[ -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" ]] && [[ -f "$HOME/.acme.sh/${domain}_ecc/${domain}.cer" ]]; then
 		modifyTime=$(stat "$HOME/.acme.sh/${domain}_ecc/${domain}.cer" | sed -n '7,6p' | awk '{print $2" "$3" "$4" "$5}')
 
@@ -1213,7 +1297,7 @@ renewalTLS() {
 		currentTime=$(date +%s)
 		((stampDiff = currentTime - modifyTime))
 		((days = stampDiff / 86400))
-		((remainingDays = 90 - days))
+		((remainingDays = sslRenewalDays - days))
 
 		tlsStatus=${remainingDays}
 		if [[ ${remainingDays} -le 0 ]]; then
@@ -1250,7 +1334,7 @@ checkTLStatus() {
 		currentTime=$(date +%s)
 		((stampDiff = currentTime - modifyTime))
 		((days = stampDiff / 86400))
-		((remainingDays = 90 - days))
+		((remainingDays = sslRenewalDays - days))
 
 		tlsStatus=${remainingDays}
 		if [[ ${remainingDays} -le 0 ]]; then
@@ -1271,7 +1355,7 @@ installV2Ray() {
 	if [[ "${coreInstallType}" != "2" && "${coreInstallType}" != "3" ]]; then
 		if [[ "${selectCoreType}" == "2" ]]; then
 
-			version=$(curl -s https://api.github.com/repos/v2fly/v2ray-core/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | head -1)
+			version=$(curl -s https://api.github.com/repos/v2fly/v2ray-core/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | grep -v 'v5' | head -1)
 		else
 			version=${v2rayCoreVersion}
 		fi
@@ -1355,11 +1439,11 @@ v2rayVersionManageMenu() {
 		echoContent yellow "2.不保证回退后一定可以正常使用"
 		echoContent yellow "3.如果回退的版本不支持当前的config，则会无法连接，谨慎操作"
 		echoContent skyBlue "------------------------Version-------------------------------"
-		curl -s https://api.github.com/repos/v2fly/v2ray-core/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | head -5 | awk '{print ""NR""":"$0}'
+		curl -s https://api.github.com/repos/v2fly/v2ray-core/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | grep -v 'v5' | head -5 | awk '{print ""NR""":"$0}'
 
 		echoContent skyBlue "--------------------------------------------------------------"
 		read -r -p "请输入要回退的版本:" selectV2rayVersionType
-		version=$(curl -s https://api.github.com/repos/v2fly/v2ray-core/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | head -5 | awk '{print ""NR""":"$0}' | grep "${selectV2rayVersionType}:" | awk -F "[:]" '{print $2}')
+		version=$(curl -s https://api.github.com/repos/v2fly/v2ray-core/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | grep -v 'v5' | head -5 | awk '{print ""NR""":"$0}' | grep "${selectV2rayVersionType}:" | awk -F "[:]" '{print $2}')
 		if [[ -n "${version}" ]]; then
 			updateV2Ray "${version}"
 		else
@@ -1385,15 +1469,21 @@ xrayVersionManageMenu() {
 	fi
 	echoContent red "\n=============================================================="
 	echoContent yellow "1.升级Xray-core"
-	echoContent yellow "2.回退Xray-core"
-	echoContent yellow "3.关闭Xray-core"
-	echoContent yellow "4.打开Xray-core"
-	echoContent yellow "5.重启Xray-core"
+	echoContent yellow "2.升级Xray-core 预览版"
+	echoContent yellow "3.回退Xray-core"
+	echoContent yellow "4.关闭Xray-core"
+	echoContent yellow "5.打开Xray-core"
+	echoContent yellow "6.重启Xray-core"
 	echoContent red "=============================================================="
 	read -r -p "请选择:" selectXrayType
 	if [[ "${selectXrayType}" == "1" ]]; then
 		updateXray
 	elif [[ "${selectXrayType}" == "2" ]]; then
+
+		prereleaseStatus=true
+		updateXray
+
+	elif [[ "${selectXrayType}" == "3" ]]; then
 		echoContent yellow "\n1.只可以回退最近的五个版本"
 		echoContent yellow "2.不保证回退后一定可以正常使用"
 		echoContent yellow "3.如果回退的版本不支持当前的config，则会无法连接，谨慎操作"
@@ -1408,11 +1498,11 @@ xrayVersionManageMenu() {
 			echoContent red "\n ---> 输入有误，请重新输入"
 			xrayVersionManageMenu 1
 		fi
-	elif [[ "${selectXrayType}" == "3" ]]; then
-		handleXray stop
 	elif [[ "${selectXrayType}" == "4" ]]; then
-		handleXray start
+		handleXray stop
 	elif [[ "${selectXrayType}" == "5" ]]; then
+		handleXray start
+	elif [[ "${selectXrayType}" == "6" ]]; then
 		reloadCore
 	fi
 
@@ -1425,7 +1515,7 @@ updateV2Ray() {
 		if [[ -n "$1" ]]; then
 			version=$1
 		else
-			version=$(curl -s https://api.github.com/repos/v2fly/v2ray-core/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | head -1)
+			version=$(curl -s https://api.github.com/repos/v2fly/v2ray-core/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | grep -v 'v5' | head -1)
 		fi
 		# 使用锁定的版本
 		if [[ -n "${v2rayCoreVersion}" ]]; then
@@ -1449,7 +1539,7 @@ updateV2Ray() {
 		if [[ -n "$1" ]]; then
 			version=$1
 		else
-			version=$(curl -s https://api.github.com/repos/v2fly/v2ray-core/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | head -1)
+			version=$(curl -s https://api.github.com/repos/v2fly/v2ray-core/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | grep -v 'v5' | head -1)
 		fi
 
 		if [[ -n "${v2rayCoreVersion}" ]]; then
@@ -1502,7 +1592,7 @@ updateXray() {
 		if [[ -n "$1" ]]; then
 			version=$1
 		else
-			version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | head -1)
+			version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
 		fi
 
 		echoContent green " ---> Xray-core版本:${version}"
@@ -1524,7 +1614,7 @@ updateXray() {
 		if [[ -n "$1" ]]; then
 			version=$1
 		else
-			version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | head -1)
+			version=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases | jq -r ".[]|select (.prerelease==${prereleaseStatus})|.tag_name" | head -1)
 		fi
 
 		if [[ -n "$1" ]]; then
@@ -4723,7 +4813,7 @@ menu() {
 	cd "$HOME" || exit
 	echoContent red "\n=============================================================="
 	echoContent green "作者:mack-a"
-	echoContent green "当前版本:v2.5.73"
+	echoContent green "当前版本:v2.5.78"
 	echoContent green "Github:https://github.com/mack-a/v2ray-agent"
 	echoContent green "描述:八合一共存脚本\c"
 	showInstallStatus
