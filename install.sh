@@ -83,12 +83,12 @@ checkCPUVendor() {
 			'amd64' | 'x86_64')
 				xrayCoreCPUVendor="Xray-linux-64"
 				v2rayCoreCPUVendor="v2ray-linux-64"
-				# hysteriaCoreCPUVendor="hysteria-linux-amd64"
+				hysteriaCoreCPUVendor="hysteria-linux-amd64"
 				;;
 			'armv8' | 'aarch64')
 				xrayCoreCPUVendor="Xray-linux-arm64-v8a"
 				v2rayCoreCPUVendor="v2ray-linux-arm64-v8a"
-				# hysteriaCoreCPUVendor="hysteria-linux-arm64"
+				hysteriaCoreCPUVendor="hysteria-linux-arm64"
 				;;
 			*)
 				echo "  不支持此CPU架构--->"
@@ -113,7 +113,7 @@ initVar() {
 	# 核心支持的cpu版本
 	xrayCoreCPUVendor=""
 	v2rayCoreCPUVendor=""
-	# hysteriaCoreCPUVendor=""
+	hysteriaCoreCPUVendor=""
 
 	# 域名
 	domain=
@@ -153,6 +153,9 @@ initVar() {
 	# v2ray-core、xray-core配置文件的路径
 	configPath=
 
+	# hysteria 配置文件的路径
+	hysteriaConfigPath=
+
 	# 配置文件的path
 	currentPath=
 
@@ -186,7 +189,7 @@ initVar() {
 	installTLSCount=
 
 	# BTPanel状态
-	BTPanelStatus=
+	#	BTPanelStatus=
 
 	# nginx配置文件路径
 	nginxConfigPath=/etc/nginx/conf.d/
@@ -202,12 +205,60 @@ initVar() {
 
 	# 检查天数
 	sslRenewalDays=90
+
+	# dns ssl状态
+	dnsSSLStatus=
+
+	# dns tls domain
+	dnsTLSDomain=
+
+	# 该域名是否通过dns安装通配符证书
+	installDNSACMEStatus=
+
+	# 自定义端口
+	customPort=
+
+	# hysteria端口
+	hysteriaPort=
+
+	# hysteria协议
+	hysteriaProtocol=
+
+	# hysteria延迟
+	hysteriaLag=
+
+	# hysteria下行速度
+	hysteriaClientDownloadSpeed=
+
+	# hysteria上行速度
+	hysteriaClientUploadSpeed=
+
 }
 
+# 读取tls证书详情
+readAcmeTLS() {
+	if [[ -n "${currentHost}" ]]; then
+		dnsTLSDomain=$(echo "${currentHost}" | awk -F "[.]" '{print $(NF-1)"."$NF}')
+	fi
+	if [[ -d "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc" && -f "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc/*.${dnsTLSDomain}.key" && -f "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc/*.${dnsTLSDomain}.cer" ]]; then
+		installDNSACMEStatus=true
+	fi
+}
+# 读取默认自定义端口
+readCustomPort() {
+	if [[ -n "${configPath}" ]]; then
+		local port=
+		port=$(jq -r .inbounds[0].port "${configPath}${frontingType}.json")
+		if [[ "${port}" != "443" ]]; then
+			customPort=${port}
+		fi
+	fi
+}
 # 检测安装方式
 readInstallType() {
 	coreInstallType=
 	configPath=
+	hysteriaConfigPath=
 
 	# 1.检测安装目录
 	if [[ -d "/etc/v2ray-agent" ]]; then
@@ -215,7 +266,6 @@ readInstallType() {
 		if [[ -d "/etc/v2ray-agent/v2ray" && -f "/etc/v2ray-agent/v2ray/v2ray" && -f "/etc/v2ray-agent/v2ray/v2ctl" ]]; then
 			if [[ -d "/etc/v2ray-agent/v2ray/conf" && -f "/etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json" ]]; then
 				configPath=/etc/v2ray-agent/v2ray/conf/
-
 				if grep </etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json -q '"security": "tls"'; then
 					# 不带XTLS的v2ray-core
 					coreInstallType=2
@@ -237,6 +287,14 @@ readInstallType() {
 				coreInstallType=1
 			fi
 		fi
+
+		if [[ -d "/etc/v2ray-agent/hysteria" && -f "/etc/v2ray-agent/hysteria/hysteria" ]]; then
+			# 这里检测 hysteria
+			if [[ -d "/etc/v2ray-agent/hysteria/conf" ]] && [[ -f "/etc/v2ray-agent/hysteria/conf/config.json" ]] && [[ -f "/etc/v2ray-agent/hysteria/conf/client_network.json" ]]; then
+				hysteriaConfigPath=/etc/v2ray-agent/hysteria/conf/
+			fi
+		fi
+
 	fi
 }
 
@@ -269,13 +327,17 @@ readInstallProtocolType() {
 			currentInstallProtocolType=${currentInstallProtocolType}'5'
 		fi
 	done < <(find ${configPath} -name "*inbounds.json" | awk -F "[.]" '{print $1}')
+
+	if [[ -n "${hysteriaConfigPath}" ]]; then
+		currentInstallProtocolType=${currentInstallProtocolType}'6'
+	fi
 }
 
 # 检查是否安装宝塔
 checkBTPanel() {
 	if pgrep -f "BT-Panel"; then
 		nginxConfigPath=/www/server/panel/vhost/nginx/
-		BTPanelStatus=true
+		#		BTPanelStatus=true
 	fi
 }
 # 读取当前alpn的顺序
@@ -360,13 +422,24 @@ checkFirewalldAllowPort() {
 		exit 0
 	fi
 }
+
+# 读取hysteria网络环境
+readHysteriaConfig() {
+	if [[ -n "${hysteriaConfigPath}" ]]; then
+		hysteriaLag=$(jq -r .hysteriaLag <"${hysteriaConfigPath}client_network.json")
+		hysteriaClientDownloadSpeed=$(jq -r .hysteriaClientDownloadSpeed <"${hysteriaConfigPath}client_network.json")
+		hysteriaClientUploadSpeed=$(jq -r .hysteriaClientUploadSpeed <"${hysteriaConfigPath}client_network.json")
+		hysteriaPort=$(jq -r .listen <"${hysteriaConfigPath}config.json" | awk -F "[:]" '{print $2}')
+		hysteriaProtocol=$(jq -r .protocol <"${hysteriaConfigPath}config.json")
+	fi
+}
 # 检查文件目录以及path路径
 readConfigHostPathUUID() {
 	currentPath=
 	currentDefaultPort=
 	currentUUID=
 	currentHost=
-	#	currentPort=
+	currentPort=
 	currentAdd=
 	# 读取path
 	if [[ -n "${configPath}" ]]; then
@@ -403,7 +476,7 @@ readConfigHostPathUUID() {
 		if [[ -n "${defaultPortFile}" ]]; then
 			currentDefaultPort=$(echo "${defaultPortFile}" | awk -F [_] '{print $4}')
 		else
-			currentDefaultPort=443
+			currentDefaultPort=$(jq -r .inbounds[0].port ${configPath}${frontingType}.json)
 		fi
 
 	fi
@@ -414,7 +487,7 @@ readConfigHostPathUUID() {
 		if [[ "${currentAdd}" == "null" ]]; then
 			currentAdd=${currentHost}
 		fi
-		#		currentPort=$(jq .inbounds[0].port ${configPath}${frontingType}.json)
+		currentPort=$(jq .inbounds[0].port ${configPath}${frontingType}.json)
 
 	elif [[ "${coreInstallType}" == "2" || "${coreInstallType}" == "3" ]]; then
 		if [[ "${coreInstallType}" == "3" ]]; then
@@ -429,7 +502,7 @@ readConfigHostPathUUID() {
 			currentAdd=${currentHost}
 		fi
 		currentUUID=$(jq -r .inbounds[0].settings.clients[0].id ${configPath}${frontingType}.json)
-		#		currentPort=$(jq .inbounds[0].port ${configPath}${frontingType}.json)
+		currentPort=$(jq .inbounds[0].port ${configPath}${frontingType}.json)
 	fi
 }
 
@@ -518,8 +591,8 @@ readInstallType
 readInstallProtocolType
 readConfigHostPathUUID
 readInstallAlpn
+readCustomPort
 checkBTPanel
-
 # -------------------------------------------------------------
 
 # 初始化安装目录
@@ -532,7 +605,7 @@ mkdirTools() {
 	mkdir -p /etc/v2ray-agent/xray/conf
 	mkdir -p /etc/v2ray-agent/xray/tmp
 	mkdir -p /etc/v2ray-agent/trojan
-	#	mkdir -p /etc/v2ray-agent/hysteria/conf
+	mkdir -p /etc/v2ray-agent/hysteria/conf
 	mkdir -p /etc/systemd/system/
 	mkdir -p /tmp/v2ray-agent-tls/
 }
@@ -629,6 +702,15 @@ installTools() {
 	if ! find /usr/bin /usr/sbin | grep -q -w lsof; then
 		echoContent green " ---> 安装lsof"
 		${installType} lsof >/dev/null 2>&1
+	fi
+
+	if ! find /usr/bin /usr/sbin | grep -q -w dig; then
+		echoContent green " ---> 安装dig"
+		if echo "${installType}" | grep -q -w "apt"; then
+			${installType} dnsutils >/dev/null 2>&1
+		elif echo "${installType}" | grep -q -w "yum"; then
+			${installType} bind-utils >/dev/null 2>&1
+		fi
 	fi
 
 	# 检测nginx版本，并提供是否卸载的选项
@@ -796,12 +878,19 @@ initTLSNginxConfig() {
 		echoContent red "  域名不可为空--->"
 		initTLSNginxConfig 3
 	else
+		dnsTLSDomain=$(echo "${domain}" | awk -F "[.]" '{print $(NF-1)"."$NF}')
+		customPortFunction
+		local port=80
+		if [[ -n "${customPort}" ]]; then
+			port=${customPort}
+		fi
+
 		# 修改配置
 		touch ${nginxConfigPath}alone.conf
 		cat <<EOF >${nginxConfigPath}alone.conf
 server {
-    listen 80;
-    listen [::]:80;
+    listen ${port};
+    listen [::]:${port};
     server_name ${domain};
     root /usr/share/nginx/html;
     location ~ /.well-known {
@@ -820,45 +909,49 @@ server {
 	}
 }
 EOF
-		# 启动nginx
-		handleNginx start
-		checkIP
 	fi
+
+	readAcmeTLS
 }
 
 # 修改nginx重定向配置
 updateRedirectNginxConf() {
 
-	if [[ ${BTPanelStatus} == "true" ]]; then
-
-		cat <<EOF >${nginxConfigPath}alone.conf
-        server {
-        		listen 127.0.0.1:31300;
-        		server_name _;
-        		return 403;
-        }
-EOF
-
-	else
-		cat <<EOF >${nginxConfigPath}alone.conf
-		server {
-				listen 80;
-				server_name _;
-				return 403;
-        }
-		server {
-				listen 127.0.0.1:31300;
-				server_name _;
-				return 403;
-		}
-        server {
-        	listen 80;
-        	listen [::]:80;
-        	server_name ${domain};
-        	return 302 https://${domain}\${request_uri};
-        }
-EOF
+	#	if [[ ${BTPanelStatus} == "true" ]]; then
+	#
+	#		cat <<EOF >${nginxConfigPath}alone.conf
+	#        server {
+	#        		listen 127.0.0.1:31300;
+	#        		server_name _;
+	#        		return 403;
+	#        }
+	#EOF
+	#
+	#	elif [[ -n "${customPort}" ]]; then
+	#		cat <<EOF >${nginxConfigPath}alone.conf
+	#                server {
+	#                		listen 127.0.0.1:31300;
+	#                		server_name _;
+	#                		return 403;
+	#                }
+	#EOF
+	#	fi
+	local redirectDomain=${domain}
+	if [[ -n "${customPort}" ]]; then
+		redirectDomain=${domain}:${customPort}
 	fi
+	cat <<EOF >${nginxConfigPath}alone.conf
+server {
+	listen 80;
+	server_name ${domain};
+	return 302 https://${redirectDomain};
+}
+server {
+		listen 127.0.0.1:31300;
+		server_name _;
+		return 403;
+}
+EOF
 
 	if echo "${selectCustomInstallType}" | grep -q 2 && echo "${selectCustomInstallType}" | grep -q 5 || [[ -z "${selectCustomInstallType}" ]]; then
 
@@ -987,7 +1080,12 @@ EOF
 # 检查ip
 checkIP() {
 	echoContent skyBlue "\n ---> 检查域名ip中"
-	localIP=$(curl -s -m 2 "${domain}/ip")
+	local checkDomain=${domain}
+	if [[ -n "${customPort}" ]]; then
+		checkDomain="http://${domain}:${customPort}"
+	fi
+	localIP=$(curl -s -m 2 "${checkDomain}/ip")
+
 	handleNginx stop
 	if [[ -z ${localIP} ]] || ! echo "${localIP}" | sed '1{s/[^(]*(//;s/).*//;q}' | grep -q '\.' && ! echo "${localIP}" | sed '1{s/[^(]*(//;s/).*//;q}' | grep -q ':'; then
 		echoContent red "\n ---> 未检测到当前域名的ip"
@@ -996,15 +1094,29 @@ checkIP() {
 		echoContent yellow " --->  2.检查域名dns解析是否正确"
 		echoContent yellow " --->  3.如解析正确，请等待dns生效，预计三分钟内生效"
 		echoContent yellow " --->  4.如报Nginx启动问题，请手动启动nginx查看错误，如自己无法处理请提issues"
+		echoContent yellow " --->  5.错误日志:${localIP}"
+		echo
 		echoContent skyBlue " ---> 如以上设置都正确，请重新安装纯净系统后再次尝试"
+
 		if [[ -n ${localIP} ]]; then
 			echoContent yellow " ---> 检测返回值异常，建议手动卸载nginx后重新执行脚本"
 		fi
-		echoContent red " ---> 请检查防火墙规则是否开放443、80\n"
-		read -r -p "是否通过脚本修改防火墙规则开放443、80端口？[y/n]:" allPortFirewallStatus
+		local portFirewallPortStatus="443、80"
+
+		if [[ -n "${customPort}" ]]; then
+			portFirewallPortStatus="${customPort}"
+		fi
+		echoContent red " ---> 请检查防火墙规则是否开放${portFirewallPortStatus}\n"
+		read -r -p "是否通过脚本修改防火墙规则开放${portFirewallPortStatus}端口？[y/n]:" allPortFirewallStatus
+
 		if [[ ${allPortFirewallStatus} == "y" ]]; then
-			allowPort 80
-			allowPort 443
+			if [[ -n "${customPort}" ]]; then
+				allowPort "${customPort}"
+			else
+				allowPort 80
+				allowPort 443
+			fi
+
 			handleNginx start
 			checkIP
 		else
@@ -1052,7 +1164,7 @@ switchSSLType() {
 		echoContent red "\n=============================================================="
 		echoContent yellow "1.letsencrypt[默认]"
 		echoContent yellow "2.zerossl"
-		echoContent yellow "3.buypass"
+		echoContent yellow "3.buypass[不支持DNS申请]"
 		echoContent red "=============================================================="
 		read -r -p "请选择[回车]使用默认:" selectSSLType
 		case ${selectSSLType} in
@@ -1071,12 +1183,121 @@ switchSSLType() {
 		esac
 		touch /etc/v2ray-agent/tls
 		echo "${sslType}" >/etc/v2ray-agent/tls/ssl_type
+
 	fi
 }
+
+# 选择acme安装证书方式
+selectAcmeInstallSSL() {
+	local installSSLIPv6=
+	if echo "${localIP}" | grep -q ":"; then
+		installSSLIPv6="--listen-v6"
+	fi
+	echo
+	if [[ -n "${customPort}" ]]; then
+		if [[ "${selectSSLType}" == "3" ]]; then
+			echoContent red " ---> buypass不支持免费通配符证书"
+			echo
+			exit
+		fi
+		dnsSSLStatus=true
+	else
+		read -r -p "是否使用DNS申请证书[y/n]:" installSSLDNStatus
+		if [[ ${installSSLDNStatus} == 'y' ]]; then
+			dnsSSLStatus=true
+		fi
+	fi
+	acmeInstallSSL
+
+	readAcmeTLS
+}
+
+# 安装SSL证书
+acmeInstallSSL() {
+	if [[ "${dnsSSLStatus}" == "true" ]]; then
+
+		sudo "$HOME/.acme.sh/acme.sh" --issue -d "*.${dnsTLSDomain}" -d "${dnsTLSDomain}" --dns --yes-I-know-dns-manual-mode-enough-go-ahead-please -k ec-256 --server "${sslType}" ${installSSLIPv6} 2>&1 | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
+
+		local txtValue=
+		txtValue=$(tail -n 10 /etc/v2ray-agent/tls/acme.log | grep "TXT value" | awk -F "'" '{print $2}')
+		if [[ -n "${txtValue}" ]]; then
+			echoContent green " ---> 请手动添加DNS TXT记录"
+			echoContent yellow " ---> 添加方法请参考此教程，https://github.com/mack-a/v2ray-agent/blob/master/documents/dns_txt.md"
+			echoContent yellow " ---> 如同一个域名多台机器安装通配符证书，请添加多个TXT记录，不需要修改以前添加的TXT记录"
+			echoContent green " --->  name：_acme-challenge"
+			echoContent green " --->  value：${txtValue}"
+			echoContent yellow " ---> 添加完成后等请等待1-2分钟"
+			echo
+			read -r -p "是否添加完成[y/n]:" addDNSTXTRecordStatus
+			if [[ "${addDNSTXTRecordStatus}" == "y" ]]; then
+				local txtAnswer=
+				txtAnswer=$(dig +nocmd "_acme-challenge.${dnsTLSDomain}" txt +noall +answer | awk -F "[\"]" '{print $2}')
+				if echo "${txtAnswer}" | grep -q "${txtValue}"; then
+					echoContent green " ---> TXT记录验证通过"
+					echoContent green " ---> 生成证书中"
+					sudo "$HOME/.acme.sh/acme.sh" --renew -d "*.${dnsTLSDomain}" -d "${dnsTLSDomain}" --yes-I-know-dns-manual-mode-enough-go-ahead-please --ecc --server "${sslType}" ${installSSLIPv6} 2>&1 | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
+				else
+					echoContent red " ---> 验证失败，请等待1-2分钟后重新尝试"
+					acmeInstallSSL
+				fi
+			else
+				echoContent red " ---> 放弃"
+				exit 0
+			fi
+		fi
+	else
+		echoContent green " ---> 生成证书中"
+		sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server "${sslType}" ${installSSLIPv6} 2>&1 | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
+	fi
+}
+# 自定义端口
+customPortFunction() {
+	local historyCustomPortStatus=
+	local showPort=
+	if [[ -n "${customPort}" || -n "${currentPort}" ]]; then
+		echo
+		read -r -p "读取到上次安装时的端口，是否使用上次安装时的端口 ？[y/n]:" historyCustomPortStatus
+		if [[ "${historyCustomPortStatus}" == "y" ]]; then
+			showPort="${currentPort}"
+			if [[ -n "${customPort}" ]]; then
+				showPort="${customPort}"
+			fi
+			echoContent yellow "\n ---> 端口: ${showPort}"
+		fi
+	fi
+
+	if [[ "${historyCustomPortStatus}" == "n" ]] && [[ -z "${customPort}" && -z "${currentPort}" ]]; then
+		echo
+		echoContent yellow "请输入端口[默认: 443]，如自定义端口，只允许使用DNS申请证书[回车使用默认]"
+		read -r -p "端口:" customPort
+		if [[ -n "${customPort}" ]]; then
+			if ((customPort >= 1 && customPort <= 65535)); then
+				checkCustomPort
+				allowPort "${customPort}"
+			else
+				echoContent red " ---> 端口输入错误"
+				exit
+			fi
+		else
+			echoContent yellow "\n ---> 端口: 443"
+		fi
+	fi
+}
+
+# 检测端口是否占用
+checkCustomPort() {
+	if lsof -i "tcp:${customPort}" | grep -q LISTEN; then
+		echoContent red "\n ---> ${customPort}端口被占用，请手动关闭后安装\n"
+		lsof -i tcp:80 | grep LISTEN
+		exit 0
+	fi
+}
+
 # 安装TLS
 installTLS() {
 	echoContent skyBlue "\n进度  $1/${totalProgress} : 申请TLS证书\n"
 	local tlsDomain=${domain}
+
 	# 安装tls
 	if [[ -f "/etc/v2ray-agent/tls/${tlsDomain}.crt" && -f "/etc/v2ray-agent/tls/${tlsDomain}.key" && -n $(cat "/etc/v2ray-agent/tls/${tlsDomain}.crt") ]] || [[ -d "$HOME/.acme.sh/${tlsDomain}_ecc" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.key" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.cer" ]]; then
 		echoContent green " ---> 检测到证书"
@@ -1097,18 +1318,23 @@ installTLS() {
 	elif [[ -d "$HOME/.acme.sh" ]] && [[ ! -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.cer" || ! -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.key" ]]; then
 		echoContent green " ---> 安装TLS证书"
 
-		switchSSLType
-		customSSLEmail
-
-		if echo "${localIP}" | grep -q ":"; then
-			sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server "${sslType}" --listen-v6 2>&1 | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
+		if [[ "${installDNSACMEStatus}" != "true" ]]; then
+			switchSSLType
+			customSSLEmail
+			selectAcmeInstallSSL
 		else
-			sudo "$HOME/.acme.sh/acme.sh" --issue -d "${tlsDomain}" --standalone -k ec-256 --server "${sslType}" 2>&1 | tee -a /etc/v2ray-agent/tls/acme.log >/dev/null
+			echoContent green " ---> 检测到已安装通配符证书，自动生成中"
 		fi
+		if [[ "${installDNSACMEStatus}" == "true" ]]; then
+			echo
+			if [[ -d "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc" && -f "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc/*.${dnsTLSDomain}.key" && -f "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc/*.${dnsTLSDomain}.cer" ]]; then
+				sudo "$HOME/.acme.sh/acme.sh" --installcert -d "*.${dnsTLSDomain}" --fullchainpath "/etc/v2ray-agent/tls/${tlsDomain}.crt" --keypath "/etc/v2ray-agent/tls/${tlsDomain}.key" --ecc >/dev/null
+			fi
 
-		if [[ -d "$HOME/.acme.sh/${tlsDomain}_ecc" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.key" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.cer" ]]; then
+		elif [[ -d "$HOME/.acme.sh/${tlsDomain}_ecc" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.key" && -f "$HOME/.acme.sh/${tlsDomain}_ecc/${tlsDomain}.cer" ]]; then
 			sudo "$HOME/.acme.sh/acme.sh" --installcert -d "${tlsDomain}" --fullchainpath "/etc/v2ray-agent/tls/${tlsDomain}.crt" --keypath "/etc/v2ray-agent/tls/${tlsDomain}.key" --ecc >/dev/null
 		fi
+
 		if [[ ! -f "/etc/v2ray-agent/tls/${tlsDomain}.crt" || ! -f "/etc/v2ray-agent/tls/${tlsDomain}.key" ]] || [[ -z $(cat "/etc/v2ray-agent/tls/${tlsDomain}.key") || -z $(cat "/etc/v2ray-agent/tls/${tlsDomain}.crt") ]]; then
 			tail -n 10 /etc/v2ray-agent/tls/acme.log
 			if [[ ${installTLSCount} == "1" ]]; then
@@ -1128,10 +1354,12 @@ installTLS() {
 				echo
 				customSSLEmail "validate email"
 				installTLS "$1"
+			else
+				installTLS "$1"
 			fi
 
-			installTLS "$1"
 		fi
+
 		echoContent green " ---> TLS生成成功"
 	else
 		echoContent yellow " ---> 未安装acme.sh"
@@ -1276,9 +1504,11 @@ installCronTLS() {
 
 # 更新证书
 renewalTLS() {
+
 	if [[ -n $1 ]]; then
 		echoContent skyBlue "\n进度  $1/1 : 更新证书"
 	fi
+	readAcmeTLS
 	local domain=${currentHost}
 	if [[ -z "${currentHost}" && -n "${tlsDomain}" ]]; then
 		domain=${tlsDomain}
@@ -1289,9 +1519,14 @@ renewalTLS() {
 			sslRenewalDays=180
 		fi
 	fi
+	if [[ -d "$HOME/.acme.sh/${domain}_ecc" && -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" && -f "$HOME/.acme.sh/${domain}_ecc/${domain}.cer" ]] || [[ "${installDNSACMEStatus}" == "true" ]]; then
+		modifyTime=
 
-	if [[ -d "$HOME/.acme.sh/${domain}_ecc" ]] && [[ -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" ]] && [[ -f "$HOME/.acme.sh/${domain}_ecc/${domain}.cer" ]]; then
-		modifyTime=$(stat "$HOME/.acme.sh/${domain}_ecc/${domain}.cer" | sed -n '7,6p' | awk '{print $2" "$3" "$4" "$5}')
+		if [[ "${installDNSACMEStatus}" == "true" ]]; then
+			modifyTime=$(stat "$HOME/.acme.sh/*.${dnsTLSDomain}_ecc/*.${dnsTLSDomain}.cer" | sed -n '7,6p' | awk '{print $2" "$3" "$4" "$5}')
+		else
+			modifyTime=$(stat "$HOME/.acme.sh/${domain}_ecc/${domain}.cer" | sed -n '7,6p' | awk '{print $2" "$3" "$4" "$5}')
+		fi
 
 		modifyTime=$(date +%s -d "${modifyTime}")
 		currentTime=$(date +%s)
@@ -1387,6 +1622,33 @@ installV2Ray() {
 	fi
 }
 
+# 安装 hysteria
+installHysteria() {
+	readInstallType
+	echoContent skyBlue "\n进度  $1/${totalProgress} : 安装Hysteria"
+
+	if [[ -z "${hysteriaConfigPath}" ]]; then
+
+		version=$(curl -s https://api.github.com/repos/apernet/hysteria/releases | jq -r '.[]|select (.prerelease==false)|.tag_name' | head -1)
+
+		echoContent green " ---> Hysteria版本:${version}"
+		if wget --help | grep -q show-progress; then
+			wget -c -q --show-progress -P /etc/v2ray-agent/hysteria/ "https://github.com/apernet/hysteria/releases/download/${version}/${hysteriaCoreCPUVendor}"
+		else
+			wget -c -P /etc/v2ray-agent/hysteria/ "https://github.com/apernet/hysteria/releases/download/${version}/${hysteriaCoreCPUVendor}" >/dev/null 2>&1
+		fi
+		mv "/etc/v2ray-agent/hysteria/${hysteriaCoreCPUVendor}" /etc/v2ray-agent/hysteria/hysteria
+		chmod 655 /etc/v2ray-agent/hysteria/hysteria
+	else
+		echoContent green " ---> Hysteria版本:$(/etc/v2ray-agent/hysteria/hysteria --version | awk '{print $3}')"
+		read -r -p "是否更新、升级？[y/n]:" reInstallHysteriaStatus
+		if [[ "${reInstallHysteriaStatus}" == "y" ]]; then
+			rm -f /etc/v2ray-agent/hysteria/hysteria
+			installHysteria "$1"
+		fi
+	fi
+
+}
 # 安装xray
 installXray() {
 	readInstallType
@@ -1700,6 +1962,39 @@ EOF
 	fi
 }
 
+# 安装hysteria开机自启
+installHysteriaService() {
+	echoContent skyBlue "\n进度  $1/${totalProgress} : 配置Hysteria开机自启"
+	if [[ -n $(find /bin /usr/bin -name "systemctl") ]]; then
+		rm -rf /etc/systemd/system/hysteria.service
+		touch /etc/systemd/system/hysteria.service
+		execStart='/etc/v2ray-agent/hysteria/hysteria --log-level info -c /etc/v2ray-agent/hysteria/conf/config.json server'
+		cat <<EOF >/etc/systemd/system/hysteria.service
+    [Unit]
+    Description=Hysteria Service
+    Documentation=https://github.com/apernet/hysteria/wiki
+    After=network.target nss-lookup.target
+    Wants=network-online.target
+
+    [Service]
+    Type=simple
+    User=root
+    CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+    NoNewPrivileges=yes
+    ExecStart=${execStart}
+    Restart=on-failure
+    RestartPreventExitStatus=23
+    LimitNPROC=10000
+    LimitNOFILE=1000000
+
+    [Install]
+    WantedBy=multi-user.target
+EOF
+		systemctl daemon-reload
+		systemctl enable hysteria.service
+		echoContent green " ---> 配置Hysteria开机自启成功"
+	fi
+}
 # Xray开机自启
 installXrayService() {
 	echoContent skyBlue "\n进度  $1/${totalProgress} : 配置Xray开机自启"
@@ -1764,6 +2059,37 @@ handleV2Ray() {
 		fi
 	fi
 }
+
+# 操作Hysteria
+handleHysteria() {
+	# shellcheck disable=SC2010
+	if find /bin /usr/bin | grep -q systemctl && ls /etc/systemd/system/ | grep -q hysteria.service; then
+		if [[ -z $(pgrep -f "hysteria/hysteria") ]] && [[ "$1" == "start" ]]; then
+			systemctl start hysteria.service
+		elif [[ -n $(pgrep -f "hysteria/hysteria") ]] && [[ "$1" == "stop" ]]; then
+			systemctl stop hysteria.service
+		fi
+	fi
+	sleep 0.8
+
+	if [[ "$1" == "start" ]]; then
+		if [[ -n $(pgrep -f "hysteria/hysteria") ]]; then
+			echoContent green " ---> Hysteria启动成功"
+		else
+			echoContent red "Hysteria启动失败"
+			echoContent red "请手动执行【/etc/v2ray-agent/hysteria/hysteria --log-level debug -c /etc/v2ray-agent/hysteria/conf/config.json server】，查看错误日志"
+			exit 0
+		fi
+	elif [[ "$1" == "stop" ]]; then
+		if [[ -z $(pgrep -f "hysteria/hysteria") ]]; then
+			echoContent green " ---> Hysteria关闭成功"
+		else
+			echoContent red "Hysteria关闭失败"
+			echoContent red "请手动执行【ps -ef|grep -v grep|grep hysteria|awk '{print \$2}'|xargs kill -9】"
+			exit 0
+		fi
+	fi
+}
 # 操作xray
 handleXray() {
 	if [[ -n $(find /bin /usr/bin -name "systemctl") ]] && [[ -n $(find /etc/systemd/system/ -name "xray.service") ]]; then
@@ -1822,10 +2148,139 @@ addClients() {
 		echo "${config}" | jq . >"${path}"
 	fi
 }
+# 添加hysteria配置
+addClientsHysteria() {
+	local path=$1
+	local addClientsStatus=$2
 
+	if [[ ${addClientsStatus} == "true" && -n "${previousClients}" ]]; then
+		local uuids=
+		uuids=$(echo "${previousClients}" | jq -r [.[].id])
+
+		if [[ "${frontingType}" == "02_trojan_TCP_inbounds" ]]; then
+			uuids=$(echo "${previousClients}" | jq -r [.[].password])
+		fi
+		config=$(jq -r ".auth.config = ${uuids}" "${path}")
+		echo "${config}" | jq . >"${path}"
+	fi
+}
+
+# 初始化hysteria端口
+initHysteriaPort() {
+	readHysteriaConfig
+	if [[ -n "${hysteriaPort}" ]]; then
+		read -r -p "读取到上次安装时的端口，是否使用上次安装时的端口 ？[y/n]:" historyHysteriaPortStatus
+		if [[ "${historyHysteriaPortStatus}" == "y" ]]; then
+			echoContent yellow "\n ---> 端口: ${hysteriaPort}"
+		else
+			hysteriaPort=
+		fi
+	fi
+
+	if [[ -z "${hysteriaPort}" ]]; then
+		echoContent yellow "请输入Hysteria端口[例: 10000]，不可与其他服务重复"
+		read -r -p "端口:" hysteriaPort
+	fi
+	if [[ -z ${hysteriaPort} ]]; then
+		echoContent red " ---> 端口不可为空"
+		initHysteriaPort "$2"
+	elif ((hysteriaPort < 1 || hysteriaPort > 65535)); then
+		echoContent red " ---> 端口不合法"
+		initHysteriaPort "$2"
+	fi
+	allowPort "${hysteriaPort}"
+}
+
+# 初始化hysteria的协议
+initHysteriaProtocol() {
+	echoContent skyBlue "\n请选择协议类型"
+	echoContent red "=============================================================="
+	echoContent yellow "1.udp(QUIC)(默认)"
+	echoContent yellow "2.faketcp"
+	echoContent yellow "3.wechat-video"
+	echoContent red "=============================================================="
+	read -r -p "请选择:" selectHysteriaProtocol
+	case ${selectHysteriaProtocol} in
+	1)
+		hysteriaProtocol="udp"
+		;;
+	2)
+		hysteriaProtocol="faketcp"
+		;;
+	3)
+		hysteriaProtocol="wechat-video"
+		;;
+	*)
+		hysteriaProtocol="udp"
+		;;
+	esac
+	echoContent yellow "\n ---> 协议: ${hysteriaProtocol}\n"
+}
+
+# 初始化hysteria网络信息
+initHysteriaNetwork() {
+
+	echoContent yellow "请输入本地到服务器的平均延迟，请按照真实情况填写（默认：180，单位：ms）"
+	read -r -p "延迟:" hysteriaLag
+	if [[ -z "${hysteriaLag}" ]]; then
+		hysteriaLag=180
+		echoContent yellow "\n ---> 延迟: ${hysteriaLag}\n"
+	fi
+
+	echoContent yellow "请输入本地带宽峰值的下行速度（默认：100，单位：Mbps）"
+	read -r -p "下行速度:" hysteriaClientDownloadSpeed
+	if [[ -z "${hysteriaClientDownloadSpeed}" ]]; then
+		hysteriaClientDownloadSpeed=100
+		echoContent yellow "\n ---> 下行速度: ${hysteriaClientDownloadSpeed}\n"
+	fi
+
+	echoContent yellow "请输入本地带宽峰值的上行速度（默认：50，单位：Mbps）"
+	read -r -p "上行速度:" hysteriaClientUploadSpeed
+	if [[ -z "${hysteriaClientUploadSpeed}" ]]; then
+		hysteriaClientUploadSpeed=50
+		echoContent yellow "\n ---> 上行速度: ${hysteriaClientUploadSpeed}\n"
+	fi
+
+	cat <<EOF >/etc/v2ray-agent/hysteria/conf/client_network.json
+{
+	"hysteriaLag":"${hysteriaLag}",
+	"hysteriaClientUploadSpeed":"${hysteriaClientUploadSpeed}",
+	"hysteriaClientDownloadSpeed":"${hysteriaClientDownloadSpeed}"
+}
+EOF
+
+}
 # 初始化Hysteria配置
 initHysteriaConfig() {
-	echoContent skyBlue "\n进度 $2/${totalProgress} : 初始化Hysteria配置"
+	echoContent skyBlue "\n进度 $1/${totalProgress} : 初始化Hysteria配置"
+
+	initHysteriaPort
+	initHysteriaProtocol
+	initHysteriaNetwork
+
+	getClients "${configPath}${frontingType}.json" true
+	cat <<EOF >/etc/v2ray-agent/hysteria/conf/config.json
+{
+	"listen": ":${hysteriaPort}",
+	"protocol": "${hysteriaProtocol}",
+	"disable_udp": false,
+	"cert": "/etc/v2ray-agent/tls/${currentHost}.crt",
+	"key": "/etc/v2ray-agent/tls/${currentHost}.key",
+	"auth": {
+		"mode": "passwords",
+		"config": []
+	},
+	"alpn": "h3",
+	"recv_window_conn": 15728640,
+	"recv_window_client": 67108864,
+	"max_conn_client": 4096,
+	"disable_mtu_discovery": true,
+	"resolve_preference": "46",
+	"resolver": "https://8.8.8.8:443/dns-query"
+}
+EOF
+
+	addClientsHysteria "/etc/v2ray-agent/hysteria/conf/config.json" true
 }
 
 # 初始化V2Ray 配置文件
@@ -1944,7 +2399,7 @@ EOF
 		"clients": [
 		  {
 			"password": "${uuid}",
-			"email": "${domain}_trojan_tcp"
+			"email": "${domain}_${uuid}"
 		  }
 		],
 		"fallbacks":[
@@ -1981,7 +2436,7 @@ EOF
 		"clients": [
 		  {
 			"id": "${uuid}",
-			"email": "${domain}_VLESS_WS"
+			"email": "${domain}_${uuid}"
 		  }
 		],
 		"decryption": "none"
@@ -2019,7 +2474,7 @@ EOF
                 "clients": [
                     {
                         "password": "${uuid}",
-                        "email": "${domain}_trojan_gRPC"
+                        "email": "${domain}_${uuid}"
                     }
                 ],
                 "fallbacks": [
@@ -2061,7 +2516,7 @@ EOF
         "id": "${uuid}",
         "alterId": 0,
         "add": "${add}",
-        "email": "${domain}_vmess_ws"
+        "email": "${domain}_${uuid}"
       }
     ]
   },
@@ -2095,7 +2550,7 @@ EOF
                 {
                     "id": "${uuid}",
                     "add": "${add}",
-                    "email": "${domain}_VLESS_gRPC"
+                    "email": "${domain}_${uuid}"
                 }
             ],
             "decryption": "none"
@@ -2115,11 +2570,16 @@ EOF
 
 	# VLESS_TCP
 	getClients "${configPath}../tmp/02_VLESS_TCP_inbounds.json" "${addClientsStatus}"
+	local defaultPort=443
+	if [[ -n "${customPort}" ]]; then
+		defaultPort=${customPort}
+	fi
+
 	cat <<EOF >/etc/v2ray-agent/v2ray/conf/02_VLESS_TCP_inbounds.json
 {
 "inbounds":[
 {
-  "port": 443,
+  "port": ${defaultPort},
   "protocol": "vless",
   "tag":"VLESSTCP",
   "settings": {
@@ -2184,7 +2644,7 @@ initXrayFrontingConfig() {
 	echoContent red "\n=============================================================="
 	echoContent yellow "# 注意事项\n"
 	echoContent yellow "会将前置替换为${xtlsType}"
-	echoContent yellow "如果前置是Trojan，查看帐号时则会出现两个Trojan协议的节点，有一个不可用xtls"
+	echoContent yellow "如果前置是Trojan，查看账号时则会出现两个Trojan协议的节点，有一个不可用xtls"
 	echoContent yellow "再次执行可切换至上一次的前置\n"
 
 	echoContent yellow "1.切换至${xtlsType}"
@@ -2352,7 +2812,7 @@ EOF
 		"clients": [
 		  {
 			"password": "${uuid}",
-			"email": "${domain}_trojan_tcp"
+			"email": "${domain}_${uuid}"
 		  }
 		],
 		"fallbacks":[
@@ -2389,7 +2849,7 @@ EOF
 		"clients": [
 		  {
 			"id": "${uuid}",
-			"email": "${domain}_VLESS_WS"
+			"email": "${domain}_${uuid}"
 		  }
 		],
 		"decryption": "none"
@@ -2427,7 +2887,7 @@ EOF
                 "clients": [
                     {
                         "password": "${uuid}",
-                        "email": "${domain}_trojan_gRPC"
+                        "email": "${domain}_${uuid}"
                     }
                 ],
                 "fallbacks": [
@@ -2467,7 +2927,7 @@ EOF
         "id": "${uuid}",
         "alterId": 0,
         "add": "${add}",
-        "email": "${domain}_vmess_ws"
+        "email": "${domain}_${uuid}"
       }
     ]
   },
@@ -2501,7 +2961,7 @@ EOF
                 {
                     "id": "${uuid}",
                     "add": "${add}",
-                    "email": "${domain}_VLESS_gRPC"
+                    "email": "${domain}_${uuid}"
                 }
             ],
             "decryption": "none"
@@ -2521,11 +2981,16 @@ EOF
 
 	# VLESS_TCP
 	getClients "${configPath}../tmp/02_VLESS_TCP_inbounds.json" "${addClientsStatus}"
+	local defaultPort=443
+	if [[ -n "${customPort}" ]]; then
+		defaultPort=${customPort}
+	fi
+
 	cat <<EOF >/etc/v2ray-agent/xray/conf/02_VLESS_TCP_inbounds.json
 {
 "inbounds":[
 {
-  "port": 443,
+  "port": ${defaultPort},
   "protocol": "vless",
   "tag":"VLESSTCP",
   "settings": {
@@ -2534,7 +2999,7 @@ EOF
         "id": "${uuid}",
         "add":"${add}",
         "flow":"xtls-rprx-direct",
-        "email": "${domain}_VLESS_XTLS/TLS-direct_TCP"
+        "email": "${domain}_${uuid}"
       }
     ],
     "decryption": "none",
@@ -2792,6 +3257,15 @@ trojan://${id}@${currentAdd}:${currentDefaultPort}?encryption=none&peer=${curren
 EOF
 		echoContent yellow " ---> 二维码 Trojan gRPC(TLS)"
 		echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=trojan%3a%2f%2f${id}%40${currentAdd}%3a${currentDefaultPort}%3Fencryption%3Dnone%26security%3Dtls%26peer%3d${currentHost}%26type%3Dgrpc%26sni%3d${currentHost}%26path%3D${currentPath}trojangrpc%26alpn%3Dh2%26serviceName%3D${currentPath}trojangrpc%23${email}\n"
+
+	elif [[ "${type}" == "hysteria" ]]; then
+		echoContent yellow " ---> Hysteria(TLS)"
+		echoContent green "    hysteria://${currentHost}:${hysteriaPort}?protocol=${hysteriaProtocol}&auth=${id}&peer=${currentHost}&insecure=0&alpn=h3&upmbps=${hysteriaClientUploadSpeed}&downmbps=${hysteriaClientDownloadSpeed}#${email}\n"
+		cat <<EOF >>"/etc/v2ray-agent/subscribe_tmp/${subAccount}"
+hysteria://${currentHost}:${hysteriaPort}?protocol=${hysteriaProtocol}&auth=${id}&peer=${currentHost}&insecure=0&alpn=h3&upmbps=${hysteriaClientUploadSpeed}&downmbps=${hysteriaClientDownloadSpeed}#${email}
+EOF
+		echoContent yellow " ---> 二维码 Hysteria(TLS)"
+		echoContent green "    https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=hysteria%3A%2F%2F${currentHost}%3A${hysteriaPort}%3Fprotocol%3D${hysteriaProtocol}%26auth%3D${id}%26peer%3D${currentHost}%26insecure%3D0%26alpn%3Dh3%26upmbps%3D${hysteriaClientUploadSpeed}%26downmbps%3D${hysteriaClientDownloadSpeed}%23${email}\n"
 	fi
 
 }
@@ -2801,6 +3275,7 @@ showAccounts() {
 	readInstallType
 	readInstallProtocolType
 	readConfigHostPathUUID
+	readHysteriaConfig
 	echoContent skyBlue "\n进度 $1/${totalProgress} : 账号"
 	local show
 	# VLESS TCP
@@ -2809,16 +3284,21 @@ showAccounts() {
 		if echo "${currentInstallProtocolType}" | grep -q trojan; then
 			echoContent skyBlue "===================== Trojan TCP TLS/XTLS-direct/XTLS-splice ======================\n"
 			jq .inbounds[0].settings.clients ${configPath}02_trojan_TCP_inbounds.json | jq -c '.[]' | while read -r user; do
-				echoContent skyBlue "\n ---> 帐号:$(echo "${user}" | jq -r .email)"
-				defaultBase64Code trojanTCPXTLS "$(echo "${user}" | jq -r .email)" "$(echo "${user}" | jq -r .password)"
+				local email=
+				email=$(echo "${user}" | jq -r .email)
+				echoContent skyBlue "\n ---> 账号:${email}"
+				defaultBase64Code trojanTCPXTLS "${email}" "$(echo "${user}" | jq -r .password)"
 			done
 
 		else
 			echoContent skyBlue "===================== VLESS TCP TLS/XTLS-direct/XTLS-splice ======================\n"
 			jq .inbounds[0].settings.clients ${configPath}02_VLESS_TCP_inbounds.json | jq -c '.[]' | while read -r user; do
-				echoContent skyBlue "\n ---> 帐号:$(echo "${user}" | jq -r .email)"
+				local email=
+				email=$(echo "${user}" | jq -r .email)
+
+				echoContent skyBlue "\n ---> 账号:${email}"
 				echo
-				defaultBase64Code vlesstcp "$(echo "${user}" | jq -r .email)" "$(echo "${user}" | jq -r .id)"
+				defaultBase64Code vlesstcp "${email}" "$(echo "${user}" | jq -r .id)"
 			done
 		fi
 
@@ -2827,14 +3307,17 @@ showAccounts() {
 			echoContent skyBlue "\n================================ VLESS WS TLS CDN ================================\n"
 
 			jq .inbounds[0].settings.clients ${configPath}03_VLESS_WS_inbounds.json | jq -c '.[]' | while read -r user; do
-				echoContent skyBlue "\n ---> 帐号:$(echo "${user}" | jq -r .email)"
+				local email=
+				email=$(echo "${user}" | jq -r .email)
+
+				echoContent skyBlue "\n ---> 账号:${email}"
 				echo
 				local path="${currentPath}ws"
 				#	if [[ ${coreInstallType} == "1" ]]; then
 				#		echoContent yellow "Xray的0-RTT path后面会有，不兼容以v2ray为核心的客户端，请手动删除后使用\n"
 				#		path="${currentPath}ws"
 				#	fi
-				defaultBase64Code vlessws "$(echo "${user}" | jq -r .email)" "$(echo "${user}" | jq -r .id)"
+				defaultBase64Code vlessws "${email}" "$(echo "${user}" | jq -r .id)"
 			done
 		fi
 
@@ -2846,9 +3329,12 @@ showAccounts() {
 				path="${currentPath}vws"
 			fi
 			jq .inbounds[0].settings.clients ${configPath}05_VMess_WS_inbounds.json | jq -c '.[]' | while read -r user; do
-				echoContent skyBlue "\n ---> 帐号:$(echo "${user}" | jq -r .email)"
+				local email=
+				email=$(echo "${user}" | jq -r .email)
+
+				echoContent skyBlue "\n ---> 账号:${email}"
 				echo
-				defaultBase64Code vmessws "$(echo "${user}" | jq -r .email)" "$(echo "${user}" | jq -r .id)"
+				defaultBase64Code vmessws "${email}" "$(echo "${user}" | jq -r .id)"
 			done
 		fi
 
@@ -2859,9 +3345,13 @@ showAccounts() {
 			#			local serviceName
 			#			serviceName=$(jq -r .inbounds[0].streamSettings.grpcSettings.serviceName ${configPath}06_VLESS_gRPC_inbounds.json)
 			jq .inbounds[0].settings.clients ${configPath}06_VLESS_gRPC_inbounds.json | jq -c '.[]' | while read -r user; do
-				echoContent skyBlue "\n ---> 帐号:$(echo "${user}" | jq -r .email)"
+
+				local email=
+				email=$(echo "${user}" | jq -r .email)
+
+				echoContent skyBlue "\n ---> 账号:${email}"
 				echo
-				defaultBase64Code vlessgrpc "$(echo "${user}" | jq -r .email)" "$(echo "${user}" | jq -r .id)"
+				defaultBase64Code vlessgrpc "${email}" "$(echo "${user}" | jq -r .id)"
 			done
 		fi
 	fi
@@ -2870,22 +3360,51 @@ showAccounts() {
 	if echo ${currentInstallProtocolType} | grep -q 4; then
 		echoContent skyBlue "\n==================================  Trojan TLS  ==================================\n"
 		jq .inbounds[0].settings.clients ${configPath}04_trojan_TCP_inbounds.json | jq -c '.[]' | while read -r user; do
-			echoContent skyBlue "\n ---> 帐号:$(echo "${user}" | jq -r .email)"
+			local email=
+			email=$(echo "${user}" | jq -r .email)
+			echoContent skyBlue "\n ---> 账号:${email}"
 
-			defaultBase64Code trojan "$(echo "${user}" | jq -r .email)" "$(echo "${user}" | jq -r .password)"
+			defaultBase64Code trojan "${email}" "$(echo "${user}" | jq -r .password)"
 		done
 	fi
 
 	if echo ${currentInstallProtocolType} | grep -q 2; then
 		echoContent skyBlue "\n================================  Trojan gRPC TLS  ================================\n"
 		echoContent red "\n --->gRPC处于测试阶段，可能对你使用的客户端不兼容，如不能使用请忽略"
-		#		local serviceName=
-		#		serviceName=$(jq -r .inbounds[0].streamSettings.grpcSettings.serviceName ${configPath}04_trojan_gRPC_inbounds.json)
 		jq .inbounds[0].settings.clients ${configPath}04_trojan_gRPC_inbounds.json | jq -c '.[]' | while read -r user; do
-			echoContent skyBlue "\n ---> 帐号:$(echo "${user}" | jq -r .email)"
+			local email=
+			email=$(echo "${user}" | jq -r .email)
+
+			echoContent skyBlue "\n ---> 账号:${email}"
 			echo
-			defaultBase64Code trojangrpc "$(echo "${user}" | jq -r .email)" "$(echo "${user}" | jq -r .password)"
+			defaultBase64Code trojangrpc "${email}" "$(echo "${user}" | jq -r .password)"
 		done
+	fi
+	if echo ${currentInstallProtocolType} | grep -q 6; then
+		echoContent skyBlue "\n================================  Hysteria TLS  ================================\n"
+		echoContent red "\n --->Hysteria速度依赖与本地的网络环境，如果被QoS使用体验会非常差。IDC也有可能认为是攻击，请谨慎使用"
+
+		jq .auth.config ${hysteriaConfigPath}config.json | jq -r '.[]' | while read -r user; do
+			local defaultUser=
+			local uuidType=
+			uuidType=".id"
+
+			if [[ "${frontingType}" == "02_trojan_TCP_inbounds" ]]; then
+				uuidType=".password"
+			fi
+
+			defaultUser=$(jq '.inbounds[0].settings.clients[]|select('${uuidType}'=="'"${user}"'")' ${configPath}${frontingType}.json)
+			local email=
+			email=$(echo "${defaultUser}" | jq -r .email)
+
+			if [[ -n ${defaultUser} ]]; then
+				echoContent skyBlue "\n ---> 账号:${email}"
+				echo
+				defaultBase64Code hysteria "${email}" "${user}"
+			fi
+
+		done
+
 	fi
 
 	if [[ -z ${show} ]]; then
@@ -2894,9 +3413,6 @@ showAccounts() {
 }
 # 移除nginx302配置
 removeNginx302() {
-	# 查找到302那行并删除
-	#	local line302Result=
-	#	line302Result=$(grep -n "return 302" </etc/nginx/conf.d/alone.conf | tail -n 1)
 	local count=0
 	grep -n "return 302" <"/etc/nginx/conf.d/alone.conf" | while read -r line; do
 
@@ -3031,8 +3547,8 @@ addCorePort() {
 	echoContent red "\n=============================================================="
 	echoContent yellow "# 注意事项\n"
 	echoContent yellow "支持批量添加"
-	echoContent yellow "不影响443端口的使用"
-	echoContent yellow "查看帐号时，只会展示默认端口443的帐号"
+	echoContent yellow "不影响默认端口的使用"
+	echoContent yellow "查看账号时，只会展示默认端口的账号"
 	echoContent yellow "不允许有特殊字符，注意逗号的格式"
 	echoContent yellow "录入示例:2053,2083,2087\n"
 
@@ -3063,6 +3579,11 @@ addCorePort() {
 				# 开放端口
 				allowPort "${port}"
 
+				local settingsPort=443
+				if [[ -n "${customPort}" ]]; then
+					settingsPort=${customPort}
+				fi
+
 				cat <<EOF >"${fileName}"
 {
   "inbounds": [
@@ -3072,7 +3593,7 @@ addCorePort() {
 	  "protocol": "dokodemo-door",
 	  "settings": {
 		"address": "127.0.0.1",
-		"port": 443,
+		"port": ${settingsPort},
 		"network": "tcp",
 		"followRedirect": false
 	  },
@@ -3129,6 +3650,12 @@ unInstall() {
 
 	fi
 
+	if [[ -z "${hysteriaConfigPath}" ]]; then
+		handleHysteria stop
+		rm -rf /etc/systemd/system/hysteria.service
+		echoContent green " ---> 删除Hysteria开机自启完成"
+	fi
+
 	if [[ -f "/root/.acme.sh/acme.sh.env" ]] && grep -q 'acme.sh.env' </root/.bashrc; then
 		sed -i 's/. "\/root\/.acme.sh\/acme.sh.env"//g' "$(grep '. "/root/.acme.sh/acme.sh.env"' -rl /root/.bashrc)"
 	fi
@@ -3156,6 +3683,8 @@ unInstall() {
 	echoContent green " ---> 卸载快捷方式完成"
 	echoContent green " ---> 卸载v2ray-agent脚本完成"
 }
+
+#updateGeoSite
 
 # 修改V2Ray CDN节点
 updateV2RayCDN() {
@@ -3372,6 +3901,12 @@ addUser() {
 			trojanTCPResult=$(jq -r ".inbounds[0].settings.clients += [${trojanUsers}]" ${configPath}04_trojan_TCP_inbounds.json)
 			echo "${trojanTCPResult}" | jq . >${configPath}04_trojan_TCP_inbounds.json
 		fi
+
+		if echo ${currentInstallProtocolType} | grep -q 6; then
+			local hysteriaResult
+			hysteriaResult=$(jq -r ".auth.config += [\"${uuid}\"]" ${hysteriaConfigPath}config.json)
+			echo "${hysteriaResult}" | jq . >${hysteriaConfigPath}config.json
+		fi
 	done
 
 	reloadCore
@@ -3423,6 +3958,12 @@ removeUser() {
 			local trojanTCPResult
 			trojanTCPResult=$(jq -r 'del(.inbounds[0].settings.clients['${delUserIndex}'])' ${configPath}04_trojan_TCP_inbounds.json)
 			echo "${trojanTCPResult}" | jq . >${configPath}04_trojan_TCP_inbounds.json
+		fi
+
+		if echo ${currentInstallProtocolType} | grep -q 6; then
+			local hysteriaResult
+			hysteriaResult=$(jq -r 'del(.auth.config['${delUserIndex}'])' ${hysteriaConfigPath}config.json)
+			echo "${hysteriaResult}" | jq . >${hysteriaConfigPath}config.json
 		fi
 
 		reloadCore
@@ -3619,7 +4160,8 @@ ipv6Routing() {
 		echoContent yellow "3.如内核启动失败请检查域名后重新添加域名"
 		echoContent yellow "4.不允许有特殊字符，注意逗号的格式"
 		echoContent yellow "5.每次添加都是重新添加，不会保留上次域名"
-		echoContent yellow "6.录入示例:google,youtube,facebook\n"
+		echoContent yellow "6.强烈建议屏蔽国内的网站，下方输入【cn】即可屏蔽"
+		echoContent yellow "7.录入示例:google,youtube,facebook,cn\n"
 		read -r -p "请按照上面示例录入域名:" domainList
 
 		if [[ -f "${configPath}09_routing.json" ]]; then
@@ -4362,6 +4904,11 @@ reloadCore() {
 		handleV2Ray stop
 		handleV2Ray start
 	fi
+
+	if [[ -n "${hysteriaConfigPath}" ]]; then
+		handleHysteria stop
+		handleHysteria start
+	fi
 }
 
 # dns解锁Netflix
@@ -4550,6 +5097,10 @@ customXrayInstall() {
 		installTools 1
 		# 申请tls
 		initTLSNginxConfig 2
+		handleXray stop
+		handleNginx start
+		checkIP
+
 		installTLS 3
 		handleNginx stop
 		# 随机path
@@ -4626,6 +5177,11 @@ v2rayCoreInstall() {
 	installTools 2
 	# 申请tls
 	initTLSNginxConfig 3
+
+	handleV2Ray stop
+	handleNginx start
+	checkIP
+
 	installTLS 4
 	handleNginx stop
 	#	initNginxConfig 5
@@ -4656,6 +5212,11 @@ xrayCoreInstall() {
 	installTools 2
 	# 申请tls
 	initTLSNginxConfig 3
+
+	handleXray stop
+	handleNginx start
+	checkIP
+
 	installTLS 4
 	handleNginx stop
 	randomPathFunction 5
@@ -4677,6 +5238,33 @@ xrayCoreInstall() {
 	# 生成账号
 	checkGFWStatue 12
 	showAccounts 13
+}
+# Hysteria安装
+hysteriaCoreInstall() {
+	if [[ -z "${coreInstallType}" ]]; then
+		echoContent red "\n ---> 由于环境依赖，如安装hysteria，请先安装Xray/V2ray"
+		menu
+		exit 0
+	fi
+	totalProgress=5
+	installHysteria 1
+	initHysteriaConfig 2
+	installHysteriaService 3
+	handleHysteria stop
+	handleHysteria start
+	showAccounts 5
+}
+# 卸载 hysteria
+unInstallHysteriaCore() {
+
+	if [[ -z "${hysteriaConfigPath}" ]]; then
+		echoContent red "\n ---> 未安装"
+		exit 0
+	fi
+	handleHysteria stop
+	rm -rf /etc/v2ray-agent/hysteria/*
+	rm -rf /etc/systemd/system/hysteria.service
+	echoContent green " ---> 卸载完成"
 }
 
 # 核心管理
@@ -4709,7 +5297,8 @@ cronRenewTLS() {
 manageAccount() {
 	echoContent skyBlue "\n功能 1/${totalProgress} : 账号管理"
 	echoContent red "\n=============================================================="
-	echoContent yellow "# 每次删除、添加账号后，需要重新查看订阅生成订阅\n"
+	echoContent yellow "# 每次删除、添加账号后，需要重新查看订阅生成订阅"
+	echoContent yellow "# 如安装了Hysteria，账号会同时添加到Hysteria\n"
 	echoContent yellow "1.查看账号"
 	echoContent yellow "2.查看订阅"
 	echoContent yellow "3.添加用户"
@@ -4808,12 +5397,42 @@ switchAlpn() {
 	fi
 	reloadCore
 }
+
+# hysteria管理
+manageHysteria() {
+
+	echoContent skyBlue "\n进度  1/1 : Hysteria管理"
+	echoContent red "\n=============================================================="
+	local hysteriaStatus=
+	if [[ -n "${hysteriaConfigPath}" ]]; then
+		echoContent yellow "1.重新安装"
+		echoContent yellow "2.卸载"
+		echoContent yellow "3.更新core"
+		echoContent yellow "4.查看日志"
+		hysteriaStatus=true
+	else
+		echoContent yellow "1.安装"
+	fi
+
+	echoContent red "=============================================================="
+	read -r -p "请选择:" installHysteriaStatus
+	if [[ "${installHysteriaStatus}" == "1" ]]; then
+		hysteriaCoreInstall
+	elif [[ "${installHysteriaStatus}" == "2" && "${hysteriaStatus}" == "true" ]]; then
+		unInstallHysteriaCore
+	elif [[ "${installHysteriaStatus}" == "3" && "${hysteriaStatus}" == "true" ]]; then
+		installHysteria 1
+		handleHysteria start
+	elif [[ "${installHysteriaStatus}" == "4" && "${hysteriaStatus}" == "true" ]]; then
+		journalctl -fu hysteria
+	fi
+}
 # 主菜单
 menu() {
 	cd "$HOME" || exit
 	echoContent red "\n=============================================================="
 	echoContent green "作者:mack-a"
-	echoContent green "当前版本:v2.5.78"
+	echoContent green "当前版本:v2.6.13"
 	echoContent green "Github:https://github.com/mack-a/v2ray-agent"
 	echoContent green "描述:八合一共存脚本\c"
 	showInstallStatus
@@ -4836,25 +5455,26 @@ menu() {
 		echoContent yellow "3.切换Trojan[XTLS]"
 	fi
 
+	echoContent yellow "4.Hysteria管理"
 	echoContent skyBlue "-------------------------工具管理-----------------------------"
-	echoContent yellow "4.账号管理"
-	echoContent yellow "5.更换伪装站"
-	echoContent yellow "6.更新证书"
-	echoContent yellow "7.更换CDN节点"
-	echoContent yellow "8.IPv6分流"
-	echoContent yellow "9.WARP分流"
-	echoContent yellow "10.流媒体工具"
-	echoContent yellow "11.添加新端口"
-	echoContent yellow "12.BT下载管理"
-	echoContent yellow "13.切换alpn"
-	echoContent yellow "14.域名黑名单"
+	echoContent yellow "5.账号管理"
+	echoContent yellow "6.更换伪装站"
+	echoContent yellow "7.更新证书"
+	echoContent yellow "8.更换CDN节点"
+	echoContent yellow "9.IPv6分流"
+	echoContent yellow "10.WARP分流"
+	echoContent yellow "11.流媒体工具"
+	echoContent yellow "12.添加新端口"
+	echoContent yellow "13.BT下载管理"
+	echoContent yellow "14.切换alpn"
+	echoContent yellow "15.域名黑名单"
 	echoContent skyBlue "-------------------------版本管理-----------------------------"
-	echoContent yellow "15.core管理"
-	echoContent yellow "16.更新脚本"
-	echoContent yellow "17.安装BBR、DD脚本"
+	echoContent yellow "16.core管理"
+	echoContent yellow "17.更新脚本"
+	echoContent yellow "18.安装BBR、DD脚本"
 	echoContent skyBlue "-------------------------脚本管理-----------------------------"
-	echoContent yellow "18.查看日志"
-	echoContent yellow "19.卸载脚本"
+	echoContent yellow "19.查看日志"
+	echoContent yellow "20.卸载脚本"
 	echoContent red "=============================================================="
 	mkdirTools
 	aliasInstall
@@ -4870,51 +5490,54 @@ menu() {
 		initXrayFrontingConfig 1
 		;;
 	4)
-		manageAccount 1
+		manageHysteria
 		;;
 	5)
-		updateNginxBlog 1
+		manageAccount 1
 		;;
 	6)
-		renewalTLS 1
+		updateNginxBlog 1
 		;;
 	7)
-		updateV2RayCDN 1
+		renewalTLS 1
 		;;
 	8)
-		ipv6Routing 1
+		updateV2RayCDN 1
 		;;
 	9)
-		warpRouting 1
+		ipv6Routing 1
 		;;
 	10)
-		streamingToolbox 1
+		warpRouting 1
 		;;
 	11)
-		addCorePort 1
+		streamingToolbox 1
 		;;
 	12)
-		btTools 1
+		addCorePort 1
 		;;
 	13)
-		switchAlpn 1
+		btTools 1
 		;;
 	14)
-		blacklist 1
+		switchAlpn 1
 		;;
 	15)
-		coreVersionManageMenu 1
+		blacklist 1
 		;;
 	16)
-		updateV2RayAgent 1
+		coreVersionManageMenu 1
 		;;
 	17)
-		bbrInstall
+		updateV2RayAgent 1
 		;;
 	18)
-		checkLog 1
+		bbrInstall
 		;;
 	19)
+		checkLog 1
+		;;
+	20)
 		unInstall 1
 		;;
 	esac
